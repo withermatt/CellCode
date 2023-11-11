@@ -1,0 +1,736 @@
+---
+title: "CellCode 10x scRNAseq analysis"
+author: "Matthew Wither"
+date: "11/1/23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+  
+################  Startup  ########################
+```{r}
+setwd("~/CellCode")
+
+#load startup
+source("startup.R")
+
+#Load in key objects
+cds_by_base <- readRDS("Robjects/cds_by_base.rds")
+cds_processed <- readRDS("Robjects/cds_processed.rds")
+pData <- as.data.frame(colData(cds_processed))
+
+base_colors <-c("Rest" = "grey60",  "CD3" = "#b2182b", "CD3/28" = "#2166ac", "CD3/28/IL-12" = "#5aae61")
+
+```
+
+############ Cluster analysis #######################
+Cluster cells
+```{r}
+#Cell clustering was initially done in pre-processing. Can re-do here with altered parameters to tune cluster size. #Can try increasing to 1000.
+#Increasing k reduces the number of clusters
+#Need to save seed for reproducibility. Result is not identical with repeated clusterings
+#set.seed(42)
+#cds_processed <- cluster_cells(cds_processed, reduction_method = "UMAP", k = 100, cluster_method = "louvain")
+
+#Add cluster classifications to colData
+#colData(cds_processed)$cluster <- clusters(cds_processed)
+#pData <- as.data.frame(colData(cds_processed))
+
+#Color UMAP by cluster
+plot_cells(cds_processed, color_cells_by = "cluster", group_label_size = 6)
+
+#Remove rested cells and re-plot
+#cds_norest <- cds_processed[,row.names(subset(pData,base_new != "Rest"))]
+#pData_norest <- as.data.frame(colData(cds_norest))
+
+#Re-format heatmap
+cluster_frequency_plot <- plot_cluster_composition_heatmap(df = pData, row_var = "unique", annotation_bar_groupings = "base_new", annotation_colors = base_colors, row_label_annotation_thresh = 1, column_reorder = "CD3/28_IL-12_0.1ng/mL", label_size = 3)
+
+draw(cluster_frequency_plot)
+
+#Save as PDF - ensures accurate annotation links to the correct rows
+pdf(file = "PDFs/UMAPclusterComps.pdf", width = 8.5, height = 11)
+draw(cluster_frequency_plot)
+dev.off()
+
+
+```
+
+Test for significance of enrichment in a cluster
+```{r}
+#Fisher's Exact test for use with small sample frequencies (< 5 )
+#https://www.pathwaycommons.org/guide/primers/statistics/fishers_exact_test/
+
+#First duplicate the IL-12 null cells from CD3/28 base to the IL-12 base and rename as null prior to splitting
+IL12null <- pData[which(pData$unique == "CD3/28_IL-12_1ng/mL"),]
+IL12null$base_new <- "CD3/28/IL-12"
+IL12null$unique <- paste0(IL12null$base_new[1],"_Null_")
+
+#Now we can pass this dataframe to the testing function
+df <- bind_rows(pData, IL12null)
+
+enrichment <- test_cluster_enrichment(df, split_by = "base_new", control_identifier = "Null", greater_than = T)
+neg_enrichment <- test_cluster_enrichment(df, split_by = "base_new", control_identifier = "Null", greater_than = F)
+
+
+#Plot results
+plot_cluster_enrichment(as.matrix(enrichment[grep("CD3_", rownames(enrichment)),]), 
+                        #annotation_bar_groupings = pData$base_new[match(rownames(enrichment), pData$unique)],
+                        annotation_bar_groupings = NULL,
+                        #annotation_colors = base_colors,
+                        annotation_colors = NULL,
+                        row_label_annotation_pval_thresh = 0.05,
+                        cluster_column_var = F)
+
+plot_cluster_enrichment(as.matrix(neg_enrichment), 
+                        annotation_bar_groupings = pData$base_new[match(rownames(neg_enrichment), pData$unique)],
+                        annotation_colors = base_colors,
+                        row_label_annotation_pval_thresh = 0.002,
+                        cluster_column_var = F)
+
+
+#Alternate heatmap visualization of cluster enrichment
+#Split by base condition and show side-by-side
+#Plot each cytokine now as a row, with a vector comprising all clusters from 4 base conditions
+#Re-order columns based on clsuter frequency heatmap
+
+#Need to parse out the conditions and re-organize the data frame/matrix
+enrichment2 <- enrichment
+#enrichment2 <- neg_enrichment #Run this instead for negative enrichment results
+enrichment2$base_new <- pData$base_new[match(rownames(enrichment2), pData$unique)]
+enrichment2$Cond <- pData$Cond[match(rownames(enrichment2), pData$unique)]
+enrichment2$base_new[match("CD3/28/IL-12_Null_", rownames(enrichment2))] <- "CD3/28/IL-12"
+enrichment2$Cond[match("CD3/28/IL-12_Null_", rownames(enrichment2))] <- "Null_"
+
+enrichment3 <- pivot_wider(enrichment2, names_from = base_new, values_from = c(1:ncol(enrichment)))
+
+#Create vector of column names to reorder data frame with
+#Get column order from frequency heatmap dendrogram
+hm_for_order <- draw(cluster_frequency_plot)
+
+column_reorder_vector <- paste( rep(column_order(hm_for_order), length(base_colors)), rep(names(base_colors), each = ncol(enrichment)), sep = "_")
+
+enrichment4 <- as.data.frame(enrichment3[,column_reorder_vector])
+rownames(enrichment4) <- enrichment3$Cond
+enrichment4 <- as.matrix(enrichment4)
+enrichment4[is.na(enrichment4)] <- 0
+
+#Split heatmap by base
+split <- data.frame(split = rep(names(base_colors), each = ncol(enrichment)))
+
+#Plot for cluster enrichment
+pdf(file = "PDFs/UMAPclusterFisherTest_up_split.pdf", width = 9, height = 7)
+plot_cluster_enrichment2(enrichment4, annotation_colors = base_colors, column_split_groups = split,
+                         col_map = colorRamp2(c(0, 1.3, 2.7, 7), c("white", "grey", "red", "darkred")))
+dev.off()
+
+#Plot for cluster negative enrichment
+# pdf(file = "PDFs/UMAPclusterFisherTest_down_split.pdf", width = 9, height = 7)
+# plot_cluster_enrichment2(enrichment4, annotation_colors = base_colors, column_split_groups = split,
+#                          col_map = colorRamp2(c(0, 1.3, 2.7, 7), c("white", "grey", "blue", "darkblue")))
+# dev.off()
+
+
+
+```
+
+Find marker genes for each cluster
+```{r}
+#Find marker genes for each cluster
+markers <- top_markers(cds_processed, group_cells_by="cluster", marker_sig_test = T)
+
+#write.csv(markers, "marker_genes.csv")
+markers <- read.csv("Robjects/marker_genes.csv")
+
+#Select genes of interest to plot on UMAP
+GOIs <- c("Il2ra", "Gzmb", "Ifng", "Bcl2", "Batf3", "Il13")
+GOIs <- c("Xcl1", "Ccl3", "Hif1a", "Ms4a4b")
+
+#Set color scale manually
+plot_cells(cds_processed, genes = "Irf4", group_label_size = 0, scale_to_range = F, norm_method = "log", alpha = 0.5) + scale_color_viridis(option = "C", direction = 1, name = "Expr", limits = c(-0.1,1.5))
+
+#Set color scale to % of max
+plot_cells(cds_processed, genes = GOIs, group_label_size = 0, scale_to_range = T, norm_method = "log", alpha = 0.5) + scale_color_viridis(option = "C", direction = 1, name = "Expr")
+
+#GO analysis
+#https://guangchuangyu.github.io/2016/01/go-analysis-using-clusterprofiler/
+marker_genes <- lapply(split(markers, markers$cell_group), function(x){ return(x$gene_id) })
+
+#Perform GO ontology enrichment analysis
+GOdata <- pbmapply(GO_enrichment_analysis, gene_list = marker_genes, list_names = 1:length(marker_genes), sim_cutoff = 0.5, SIMPLIFY = F)
+
+#Filter results
+GOdata <- lapply(GOdata, filter_GOdata, n = 5)
+#Add filter to consolidate similar categories based on shared number of genes
+
+#saveRDS(GOdata, "Robjects/GO_markergene_results.rds")
+#GOdata <- readRDS("Robjects/GO_gm_results.rds")
+
+GOdata2 <- bind_rows(GOdata)
+GOdata2$cluster <- as.factor(GOdata2$cluster)
+GOdata2$Description <- as.factor(GOdata2$Description)
+
+GOdata2 <- subset(GOdata2, Count >=5)
+
+ggplot(data = GOdata2, aes(x = GeneRatio, y = Description, size = Count, color = qvalue)) +
+  geom_point() +
+  scale_color_continuous(low="red", high="blue",
+                           guide=guide_colorbar(reverse=TRUE)) +
+  facet_grid(cluster~., scale="free") +
+  #facet_wrap(~cluster, ncol = 3) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+
+```
+
+Base condition-specific analysis
+```{r}
+
+#Can run the cluster enrichment function through lapply, looping over all base conditions.
+cluster_enrichment_by_base <- pblapply(cds_by_base, FUN = function(cds) {
+  cds_data <- as.data.frame(colData(cds))
+  
+  #Make frequency plot
+  frequencies_hm <- plot_cluster_composition_heatmap(df = cds_data, row_var = "unique", annotation_bar_groupings = NULL, annotation_colors = NULL, row_label_annotation_thresh = 1, column_reorder = TRUE, label_size = 3)
+  
+  #Fisher test
+  
+  
+  
+  
+  return(list(frequencies_hm))
+  
+})
+
+
+
+
+```
+
+UMAP all conditions
+```{r}
+#Plot UMAP colored by base condition
+plot_cells(cds_processed, color_cells_by = "base_new", label_cell_groups = F, norm_method = "log", alpha = 0.5) +
+  scale_color_manual(values = base_colors)
+
+#You can color the cells by any variable in pData
+#plot_cells(cds_processed, color_cells_by = "Phase", label_cell_groups = F, norm_method = "log", alpha = 0.5)
+
+#Manually plot with ggplot to enable fuller control over plot parameters
+ggplot(pData, aes(x = umap_1, y = umap_2, color = base_new)) +
+  geom_point(size = 0.5, stroke = 0.15, alpha = 0.7) +
+  scale_color_manual(values = base_colors) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+#Check CD8 levels
+# plot_cells(cds_processed, genes = "Cd8a", label_cell_groups = F, norm_method = "log", alpha = 0.5)
+# rData <- as.data.frame(rowData(cds_processed))
+# which(rData$gene_short_name == "Cd8a")
+# plot_genes_violin(cds_processed[rData$id[which(rData$gene_short_name == "Cd8a")],], group_cells_by = "cytokine")
+
+```
+
+Highlight cytokine of interest
+```{r}
+cyt_of_interest <- c("TGF-b")
+pData$color_key <- NA
+
+for (i in cyt_of_interest) {
+  pData$color_key[which(pData$cytokine == i)] <- i
+}
+
+pData$color_key[which(!is.na(pData$color_key))] <- paste(pData$base_new[which(!is.na(pData$color_key))], pData$color_key[which(!is.na(pData$color_key))], sep = "_")
+
+cyt_colors <- base_colors
+names(cyt_colors) <- paste(names(base_colors), cyt_of_interest, sep = "_")
+
+ggplot(pData, aes(x = umap_1, y = umap_2, color = color_key)) +
+  geom_point(size = 0.75, stroke = 0.15) +
+  scale_color_manual(values = cyt_colors, na.value = "#00000005") +
+  ggtitle(cyt_of_interest[1]) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+
+```
+
+UMAP by base condition
+```{r}
+#Color by cluster
+umap_by_base <- pbmapply(FUN = function(x, name) {
+  p <- plot_cells(x, group_label_size = 6) + ggtitle(name)
+  return(p)
+}, x = cds_by_base, name = names(cds_by_base), SIMPLIFY = F)
+#Plot all
+umap_by_base[[1]] + umap_by_base[[2]] + umap_by_base[[3]] + umap_by_base[[4]] +   plot_layout(ncol = 2)
+
+#Plot individual
+umap_by_base[[3]]
+
+
+#Highlight key cytokine effects on UMAP
+umap_by_base2 <- pbmapply(FUN = function(x, name) {
+  pData1 <- as.data.frame(colData(x))
+  cyt_of_interest <- c("IL-12", "IL-4", "IL-21", "TGF-b")
+  pData1$color_key <- NA
+  
+  for (i in cyt_of_interest) {
+    pData1$color_key[which(pData1$cytokine == i)] <- i
+  }
+  
+  colData(x)$color_key <- pData1$color_key
+  p <- plot_cells(x, color_cells_by = "color_key", label_cell_groups = F) +
+    scale_color_manual(values = gg_color_hue(length(cyt_of_interest)), na.value = "#ffffff00") +
+    ggtitle(name)
+
+  return(p)
+  
+}, x = cds_by_base, name = names(cds_by_base), SIMPLIFY = F)
+umap_by_base2[[1]] + umap_by_base2[[2]] + umap_by_base2[[3]] + umap_by_base2[[4]] +   plot_layout(ncol = 2)
+umap_by_base2[[3]]
+
+```
+
+
+############   Gene Module Analysis ###################
+
+Run gene-gene LASSO regressions
+```{r}
+#First get expression matrix (Sriram likely started with a different cds!)
+
+#expressiondata <- as.matrix(normalized_counts(cds_processed))
+#scaled_mat <- scale(t(expressiondata))
+
+#From this, Sriram took the top 3000 most dispersed genes (Sriram has the code)
+#That gene list is here:
+gene_list <- readRDS("Robjects/genes_allbase.rds")
+
+#This is the final scaled expression matrix used:
+scaled_mat <- readRDS("Robjects/matrix_allbase.rds")
+
+#Run LASSO - This is extremely computationally demanding!
+# lasso_result <- pbmclapply(gene_list, function(x) {
+#   # remove this gene from the matrix
+#   m1 <- scaled_mat[,colnames(scaled_mat) != x]
+#   selected_gene <- scaled_mat[,x]
+# 
+#   result = do_lasso(gene_matrix = m1, gene_vector = selected_gene)
+#   return(result)
+# 
+# }, mc.cores=4)
+
+saveRDS(lasso_result, "Robjects/matrix_allbase_lassooutput.rds")
+
+```
+
+Prepare gene-gene correlation matrix
+```{r}
+#Load in LASSO results
+lasso_result <- readRDS("Robjects/matrix_allbase_lassooutput.rds")
+
+#Turn the LASSO output into a gene x gene symmetrical matrix where each value is the beta coefficient from the regressions
+ggc_lasso <- create_lasso_ggc_matrix(lasso_result, gene_list)
+
+#Swap target id for gene short name
+rData <- as.data.frame(rowData(cds_processed))
+gene_row_names <- match(rownames(ggc_lasso), rData$id)
+rownames(ggc_lasso) <- colnames(ggc_lasso) <- rData$gene_short_name[gene_row_names]
+ggc_list <- rownames(ggc_lasso)
+
+#remove mt genes and NAs and ends in Rik
+good_genes <- ggc_list[!endsWith(ggc_list, "Rik") & !startsWith(ggc_list, "mt-") & !is.na(ggc_list)]
+
+ggc_lasso2 <- ggc_lasso[good_genes, good_genes]
+
+#Set diagonal values to the max
+#ggc_lasso2[is.na(ggc_lasso2)] <- max(ggc_lasso2, na.rm = T)
+
+#Save matrix
+#saveRDS(ggc_lasso2, "Robjects/ggc_lasso2.rds")
+
+```
+
+Monti consensus clustering using affinity propagation
+```{r}
+#Add references
+
+#Load in matrix
+ggc_lasso2 <-readRDS("Robjects/ggc_lasso2.rds")
+
+#Get scaled expression matrix using gene_short_names
+gene_row_names <- match(colnames(scaled_mat), rData$id)
+colnames(scaled_mat) <- rData$gene_short_name[gene_row_names]
+
+#Subset on the 3000 LASSO input genes
+scaled_mat <- scaled_mat[,rownames(ggc_lasso2)]
+
+#Make bootstrap samples
+samps <- bootstrap_ggc_matrix(expr_matrix = scaled_mat, sampling_iterations = 10)
+
+#Cluster over a range of parameter values for affinity propagation function
+qrange <- seq(0.45,0.95, length.out = 10)
+results <- bootstrap_apclust(ggc_matrices = samps, q_range = qrange)
+#results <- readRDS("Robjects/APresults.rds")
+
+#Output consensus matrix by q
+output <- pbmclapply(results, FUN = make_consensus_matrix, lasso_matrix = ggc_lasso2, mc.cores = 2)
+
+#Combine all q values
+results.all <- unlist(results)
+output[["all"]] <- make_consensus_matrix(cluster_results = results.all, lasso_matrix = ggc_lasso2)
+
+
+#Evaluate each q setting using DB index
+
+#Use this for computing DB index
+cor_mat <- cor(scaled_mat)
+
+#Evaluate the clusters defined from each q setting
+output_metrics <- pbmclapply(output, evaluate_clustering, ggc_mat = cor_mat, method = "AP")
+
+DB <- bind_rows(mapply(FUN = function(result, param) {
+  out.df <- data.frame(param = param,
+                       true = result[["true"]]$DB,
+                       random = result[["random"]]$DB)
+  return(out.df)
+}, result = output_metrics, param = c(qrange, 1), SIMPLIFY = F))
+
+#plot
+ggplot(DB, aes(x = param, y = true)) +
+  geom_point() +
+  labs(y = "DB index", x = "q")
+
+#Now, take the optimal input q value and merge clusters until all clusters are above the size threshold
+#Essentially:
+#1. Iterate through K and evaluate DB index and minimum cluster size
+#2. Take the top result and remove each cluster one by one to see if it improves DB, meaning there is a cluster of rejects.
+
+output_modules <- tune_clusters(output[[10]])
+
+saveRDS(output_modules, "Robjects/output_modules.rds")
+
+```
+
+
+############   Geneset Analysis ###################
+
+Effector vs memory differentiation by unique condition
+```{r}
+
+#1. Get effector and memory gene lists
+#2. Score each cell on each list
+#3. Store as data frame
+#4. Plot distributions based on condition/base
+
+#Load in genesets - downloaded locally
+goldrath_genesets <- readRDS("Robjects/goldrath_genesets.rds")
+
+#Short description of gene sets
+goldrath_desc <- c("DN_EvM", "UP_EvM", "DN_NvE", "UP_NvE", "DN_NvM", "UP_NvM")
+
+#Create data frame to store module data
+goldrath_df <- bind_rows(mapply(FUN = function(sets, set_desc) {
+  out_df <- data.frame(gene = sets, module = set_desc)
+  return(out_df)
+  
+}, sets = goldrath_genesets, set_desc = goldrath_desc, SIMPLIFY = F))
+
+#Remove genes in multiple gene sets
+goldrath_df_unique <- subset(goldrath_df, !gene %in% goldrath_df$gene[duplicated(goldrath_df$gene)])
+
+cds2 <- monocle_to_seurat(cds_processed)
+
+#Swap gene short name for target id
+id2g <- as.data.frame(rowData(cds_processed))
+
+#list of module genes
+genesets <- split(goldrath_df_unique, goldrath_df_unique$module)
+genesets <- lapply(genesets, function(x) {
+  genes <- x$gene
+  genes <- id2g$id[match(genes, id2g$gene_short_name)]
+  genes <- genes[!is.na(genes)]
+  return(genes)
+})
+
+cds2 <- Seurat::AddModuleScore(object = cds2, features = genesets, name = "geneset")
+
+geneset_scores <- cds2@meta.data[c(grep("geneset", colnames(cds2@meta.data)),
+                                   which(colnames(cds2@meta.data) == "unique"),
+                                   which(colnames(cds2@meta.data) == "base_new"))]
+
+umap_coords <- as.data.frame(reducedDims(cds_processed)$UMAP)
+geneset_scores$umap_1 <- umap_coords$V1
+geneset_scores$umap_2 <- umap_coords$V2
+
+colnames(geneset_scores)[1:length(mods)] <- names(mods)
+
+
+plot_geneset_scores(geneset_scores, goldrath_desc[3], label_size = 5, plot_type = "ridgeline")
+plot_geneset_scores(geneset_scores, goldrath_desc[2], label_size = 5, plot_type = "UMAP")
+
+
+```
+
+Score and test "gene programs" for differential expression
+```{r}
+#Score each goldrath geneset
+#Score each gene module
+#Can add in any set of genes you want
+#Do wilcoxin test for every condition against control (Null for each base)
+#Plot the results
+
+#This serves to reduce noise at the gene level by aggregating genes and analyzing the distribution of single cells from each condition.
+
+#1. Load genesets
+#Goldrath genesets downloaded from msigdb
+goldrath_genesets <- readRDS("Robjects/goldrath_genesets.rds")
+#Short description of gene sets
+goldrath_desc <- c("DN_EvM", "UP_EvM", "DN_NvE", "UP_NvE", "DN_NvM", "UP_NvM")
+#Create data frame to store genes
+goldrath_df <- bind_rows(mapply(FUN = function(sets, set_desc) {
+  out_df <- data.frame(gene = sets, module = set_desc)
+  return(out_df)
+  
+}, sets = goldrath_genesets, set_desc = goldrath_desc, SIMPLIFY = F))
+#Remove genes in multiple sets
+goldrath_df_unique <- subset(goldrath_df, !gene %in% goldrath_df$gene[duplicated(goldrath_df$gene)])
+
+#Get gene short names to swap for target id
+id2g <- as.data.frame(rowData(cds_processed))
+
+#Create list of vectors of genes
+genesets <- split(goldrath_df_unique, goldrath_df_unique$module)
+genesets <- lapply(genesets, function(x) {
+  genes <- x$gene
+  genes <- id2g$id[match(genes, id2g$gene_short_name)]
+  genes <- genes[!is.na(genes)]
+  return(genes)
+})
+
+#gene modules defined using this dataset
+output_modules <- readRDS("Robjects/output_modules.rds")
+
+#Create list of vectors of the module genes
+mods <- split(output_modules, output_modules$module)
+mods <- lapply(mods, function(x) {
+  genes <- x$gene
+  genes <- id2g$id[match(genes, id2g$gene_short_name)]
+  genes <- genes[!is.na(genes)]
+  return(genes)
+})
+
+
+#2. Convert monocle cds to Seurat object to use Seurat scoring function
+cds2 <- monocle_to_seurat(cds_processed)
+
+#Score single cells on these gene sets using Seurat's scoring function
+cds2 <- Seurat::AddModuleScore(object = cds2, features = genesets, name = "geneset")
+cds2 <- Seurat::AddModuleScore(object = cds2, features = mods, name = "mod")
+
+geneset_scores <- cds2@meta.data[c(grep("geneset", colnames(cds2@meta.data)),
+                                   grep("mod", colnames(cds2@meta.data)),
+                                   which(colnames(cds2@meta.data) == "unique"),
+                                   which(colnames(cds2@meta.data) == "base_new"),
+                                   which(colnames(cds2@meta.data) == "umap_1"),
+                                   which(colnames(cds2@meta.data) == "umap_2"))]
+
+#Plot single cell scores
+plot_geneset_scores(geneset_scores, "geneset2", label_size = 5, plot_type = "UMAP")
+plot_geneset_scores(geneset_scores, "geneset2", label_size = 5, plot_type = "ridgeline")
+
+
+#3. Test for significant difference between cytokine conditions against Null
+mod_DE_test <- geneset_DE_test(df = geneset_scores, test = "KS", control = "CD3/28_Null_")
+#Remove Inf values
+mod_DE_test[mod_DE_test > quantile(mod_DE_test,0.98)] <- quantile(mod_DE_test,0.98)
+
+Heatmap(mod_DE_test, show_row_dend = F, show_column_dend = T, show_row_names = T,
+        column_names_gp = gpar(fontsize = 4),
+        col = colorRamp2(c(0, 3, 7), c("blue", "grey", "red")))
+
+
+```
+
+Fit gene models on pseudobulked data
+```{r}
+# source("~/CellCode/hooke_for_sriram.R")
+# 
+# seu <- monocle_to_seurat(cds_processed)
+# seu <- Seurat::FindVariableFeatures(seu, nfeatures = 2000)
+# 
+# ggData = seu@assays$RNA@meta.features
+# top2k <- rownames(ggData)[which(ggData$vst.variable == TRUE)]
+# cds_top2k <- cds_processed[top2k,]
+# 
+# 
+# ccs = new_cell_count_set(cds_top2k, 
+#                          sample_group = "rep", 
+#                          cell_group = "unique")
+
+#pb_cds_top2k = pseudobulk_ccs_for_states(ccs)
+pb_cds_top2k <- readRDS("~/CellCode/pb_cds_top2k.rds")
+
+#gene_fits <- fit_models(pb_cds_top2k,model_formula_str = "~cell_group",weights=colData(pb_cds_top2k)$num_cells_in_group)
+gene_fits <- readRDS("~/CellCode/gene_fits_top2k.rds")
+
+
+fit_coefs <- coefficient_table(gene_fits)
+good_fits <- subset(fit_coefs, status == "OK" & term != "(Intercept)" & q_value < 0.05)
+good_fits <- dplyr::select(good_fits, gene_short_name, q_value, term, normalized_effect)
+
+all_fits <- subset(fit_coefs, status == "OK" & term != "(Intercept)")
+all_fits <- dplyr::select(all_fits, gene_short_name, q_value, term, normalized_effect)
+
+```
+
+Visualize gene models
+```{r}
+
+good_fits$term <- gsub("cell_group", "", good_fits$term)
+all_fits$term <- gsub("cell_group", "", all_fits$term)
+
+fits_by_condition <- split(good_fits, good_fits$term)
+fits_by_condition <- split(all_fits, all_fits$term)
+
+#Get top 2k variable genes
+gene_list <- as.data.frame(rowData(pb_cds_top2k))
+gene_list <- gene_list$gene_short_name
+
+betas <- pblapply(unique(pData$unique), function(cond) {
+  out <- rep(0, length(gene_list))
+  if (cond %in% names(fits_by_condition)) {
+    x <- fits_by_condition[[cond]]
+    ind <- match(x$gene_short_name, gene_list)
+    out[ind] <- x$normalized_effect
+  }
+  return(out)
+})
+
+betas <- as.matrix(do.call(rbind, betas))
+rownames(betas) <- unique(pData$unique)
+colnames(betas) <- gene_list
+
+#Remove genes with all zero coefficients
+gene_sums <- colSums(abs(betas))
+betas_filtered <- betas[,which(gene_sums != 0)]
+
+Heatmap(t(betas_filtered), show_row_dend = F, show_column_dend = T, show_row_names = F,
+        column_names_gp = gpar(fontsize = 4),
+        col = colorRamp2(c(quantile(betas_filtered,0.01), 0, quantile(betas_filtered,0.99)), c("blue", "grey", "red")))
+
+
+```
+
+Fit models for individual base conditions
+```{r}
+base_subset <- unique(pData$unique[which(pData$base_new == "CD3/28")])
+cell_group_subset <- as.data.frame(colData(pb_cds_top2k))
+matches <- rownames(cell_group_subset)[which(cell_group_subset$cell_group %in% base_subset)]
+
+pb_cds_top2k_subset <- pb_cds_top2k[,matches]
+gene_fits_sub <- fit_models(pb_cds_top2k_subset, model_formula_str = "~cell_group",weights=colData(pb_cds_top2k_subset)$num_cells_in_group)
+
+fit_coefs_sub <- coefficient_table(gene_fits_sub)
+
+#good_fits <- subset(fit_coefs, status == "OK" & term != "(Intercept)" & q_value < 0.05)
+#good_fits <- dplyr::select(good_fits, gene_short_name, q_value, term, normalized_effect)
+
+all_fits_sub <- subset(fit_coefs_sub, status == "OK" & term != "(Intercept)")
+all_fits_sub <- subset(fit_coefs_sub, status == "OK" & term != "(Intercept)" & q_value < 0.05)
+all_fits_sub <- dplyr::select(all_fits_sub, gene_short_name, q_value, term, normalized_effect)
+all_fits_sub$term <- gsub("cell_group", "", all_fits_sub$term)
+fits_by_condition <- split(all_fits_sub, all_fits_sub$term)
+
+gene_list <- as.data.frame(rowData(pb_cds_top2k_subset))
+gene_list <- gene_list$gene_short_name
+
+betas <- pblapply(base_subset, function(cond) {
+  out <- rep(0, length(gene_list))
+  if (cond %in% names(fits_by_condition)) {
+    x <- fits_by_condition[[cond]]
+    ind <- match(x$gene_short_name, gene_list)
+    out[ind] <- x$normalized_effect
+  }
+  return(out)
+})
+
+betas <- as.matrix(do.call(rbind, betas))
+rownames(betas) <- base_subset
+colnames(betas) <- gene_list
+
+#Remove genes with all zero coefficients
+gene_sums <- colSums(abs(betas))
+betas_filtered <- betas[,which(gene_sums != 0)]
+
+Heatmap(t(betas_filtered), show_row_dend = F, show_column_dend = T, show_row_names = F,
+        column_names_gp = gpar(fontsize = 4),
+        col = colorRamp2(c(quantile(betas_filtered,0.01), 0, quantile(betas_filtered,0.99)), c("blue", "grey", "red")))
+
+
+
+```
+
+Aggregate betas by geneset
+```{r}
+
+#Take conditions x genes matrix of beta coeffs and aggregate genes into the genesets
+#This will provide a new conditions x genesets matrix of aggregated betas
+#Plot this heatmap
+
+#Need gene short names
+
+#Goldrath gene sets
+genesets <- lapply(split(goldrath_df_unique, goldrath_df_unique$module), function(x) {
+  genes <- x$gene
+  #genes <- id2g$id[match(genes, id2g$gene_short_name)]
+  genes <- genes[!is.na(genes)]
+  return(genes)
+})
+
+#Gene modules
+mods <- lapply(split(output_modules, output_modules$module), function(x) {
+  genes <- x$gene
+  #genes <- id2g$id[match(genes, id2g$gene_short_name)]
+  genes <- genes[!is.na(genes)]
+  return(genes)
+})
+
+agg_betas <- as.matrix(do.call(rbind, lapply(genesets, function(x) {
+  x <- x[x %in% colnames(betas)]
+  if(length(x) == 0) {
+    return(NULL)
+  } else {
+    sub <- betas[,x]
+    agg <- rowMeans(sub)
+    return(agg)
+  }
+})))
+
+agg_betas <- as.matrix(do.call(rbind, lapply(mods, function(x) {
+  x <- x[x %in% colnames(betas)]
+  if(length(x) < 2) {
+    return(NULL)
+  } else {
+    sub <- betas[,x]
+    agg <- rowMeans(sub)
+    return(agg)
+  }
+})))
+
+Heatmap(agg_betas, show_row_dend = F, show_column_dend = T, show_row_names = T,
+        #row_names_gp = gpar(fontsize = 4),
+        column_names_gp = gpar(fontsize = 4),
+        col = colorRamp2(c(quantile(agg_betas,0.01), 0, quantile(agg_betas,0.99)), c("blue", "grey", "red")))
+
+
+
+
+```
+
+
+#######################################################
+
+
+
+
+
+
